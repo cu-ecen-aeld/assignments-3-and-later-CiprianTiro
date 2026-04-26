@@ -1,25 +1,35 @@
+# Use := for immediate assignment
 SRC := writer.c
-TARGET = writer
+TARGET := writer
 OBJS := $(SRC:.c=.o)
 
+# Toolchain path
 CROSS_PATH = /home/ciprian/Downloads/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
 
+# Logic to switch compilers
 ifneq (,$(filter CROSS_COMPILE,$(MAKECMDGOALS)))
     CC = $(CROSS_PATH)gcc
 else
-    CC = g++
+    # Suggest using gcc here if writer.c is a C file
+    CC = gcc
 endif
 
-# If CROSS_COMPILE command, treat it exactly like for all
+# Default target
+all: $(TARGET)
+
+# The redirect for specific command style
 CROSS_COMPILE: all
 	@:
 
-all: $(TARGET)
-
+# The build rule
 $(TARGET) : $(OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
+# Rule for object files
+%.o : %.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 clean:
-	-rm -f *.o $(TARGET) *.elf *.map
+	-rm -f *.o writer finder-app *.elf *.map
 
 .PHONY: all clean CROSS_COMPILE
