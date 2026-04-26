@@ -1,5 +1,5 @@
 SRC := writer.c
-TARGET = finder-app
+TARGET = writer
 OBJS := $(SRC:.c=.o)
 
 CROSS_PATH = /home/ciprian/Downloads/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
