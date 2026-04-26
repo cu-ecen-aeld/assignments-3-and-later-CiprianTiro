@@ -30,6 +30,6 @@ $(TARGET) : $(OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 clean:
-	-rm -f *.o writer finder-app *.elf *.map
+	-rm -f *.o writer *.elf *.map
 
 .PHONY: all clean CROSS_COMPILE
