@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include "stdlib.h"
+#include "unistd.h"
+#include <sys/wait.h>
+#include "fcntl.h"
+
 
 /**
  * @param cmd the command to execute with system()
@@ -9,15 +14,14 @@
 */
 bool do_system(const char *cmd)
 {
-
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
-
-    return true;
+    if ( system(cmd) != 0 )
+    {
+        return false;
+    }
+    else
+    {
+        return true;
+    }
 }
 
 /**
@@ -40,28 +44,60 @@ bool do_exec(int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+    pid_t child;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
-
     va_end(args);
 
-    return true;
+    /* Check if command[0] is absolute. */
+    if (command[0][0] != '/')
+        return false;
+
+    fflush(stdout);
+    /* Create new child process. */
+    child = fork();
+
+    if ( child == -1 )
+    {
+        /* Fork fail. */
+        return false;
+    }
+    else if ( child == 0)
+    {
+        /* Child process. */
+        execv(command[0], command);
+
+        /* Reaching this line, means that execv has failed. */
+        perror("execv failed");
+        _exit(EXIT_FAILURE);
+    }
+    else 
+    {
+        int status;
+        /* child > 0 --> Parent process. */
+        /* Wait for child process to finish executing commands. */
+        if ( waitpid(child, &status, 0) == -1)
+        {
+            /* Error on wait. */
+            perror("wait() error");
+            return false;
+        }
+
+        /* Check if the child actually reported an error! */
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        {
+            /* Only return true if exit code is 0. */
+            return true; 
+        } else
+        {
+            /* Return false if execv failed (exit code 1). */
+            return false;
+        }
+    }
 }
 
 /**
@@ -75,25 +111,78 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+    pid_t child;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
-
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
-
     va_end(args);
 
-    return true;
+    /* Check if command[0] is absolute. */
+    if (command[0][0] != '/')
+        return false;
+
+    fflush(stdout);
+    /* Create new child process. */
+    child = fork();
+
+    if ( child == -1 )
+    {
+        /* Fork fail. */
+        return false;
+    }
+    else if ( child == 0)
+    {
+        /* Child process. */
+
+        /* Writing to the file should be done by child process. */
+        int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+        if ( fd < 0 )
+        { 
+            perror("Error on file open.");
+            _exit(EXIT_FAILURE);
+        }
+        
+        /* Duplicate fd and then redirect the STDOUT to the file. */
+        if ( dup2(fd, STDOUT_FILENO) == -1)
+        {
+            perror("dup2");
+            _exit(EXIT_FAILURE);
+        }
+        /* Close the additional not needed file descriptor. */
+        close(fd);
+        
+        /* Execute command. */
+        execv(command[0], command);
+
+        /* Reaching this line, means that execv has failed. */
+        perror("execv failed");
+
+        _exit(EXIT_FAILURE);
+    }
+    else 
+    {
+        int status;
+        /* child > 0 --> Parent process. */
+        /* Wait for child process to finish executing commands. */
+        if ( waitpid(child, &status, 0) == -1)
+        {
+            /* Error on wait. */
+            perror("wait() error");
+            return false;
+        }
+
+        /* Check if the child actually reported an error! */
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        {
+            /* Only return true if exit code is 0. */
+            return true; 
+        } else
+        {
+            /* Return false if execv failed (exit code 1). */
+            return false;
+        }
+    }
 }
