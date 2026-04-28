@@ -3,16 +3,8 @@ SRC := writer.c
 TARGET := writer
 OBJS := $(SRC:.c=.o)
 
-# Toolchain path
-CROSS_PATH = /home/ciprian/Downloads/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
-
-# Logic to switch compilers
-ifneq (,$(filter CROSS_COMPILE,$(MAKECMDGOALS)))
-    CC = $(CROSS_PATH)gcc
-else
-    # Suggest using gcc here if writer.c is a C file
-    CC = gcc
-endif
+CROSS_COMPILE ?=
+CC = $(CROSS_COMPILE)gcc
 
 # Default target
 all: $(TARGET)
