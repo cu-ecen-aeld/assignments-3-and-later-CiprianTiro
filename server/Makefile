@@ -7,6 +7,9 @@ LDFLAGS ?= -lpthread -lrt
 # a. All and default targets
 all: $(TARGET)
 
+CROSS_COMPILE: all
+	@:
+
 default: all
 
 $(TARGET): aesdsocket.o
@@ -16,6 +19,6 @@ aesdsocket.o: aesdsocket.c
 	$(CC) $(CFLAGS) -c aesdsocket.c -o aesdsocket.o
 
 clean:
-	rm -f $(TARGET) *.o
+	rm -f $(TARGET) *.o *.elf *.map
 
-.PHONY: all default clean
+.PHONY: all clean CROSS_COMPILE
