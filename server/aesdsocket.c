@@ -72,12 +72,15 @@ void handleClientConnection(int client_fd, char *client_ip)
         syslog(LOG_DEBUG, "Writing %.*s with %zd bytes to data file from client: %s", (int)bytes_read, buffer, bytes_read, client_ip);
         fwrite(buffer, 1, bytes_read, file);
 
-        /* Ensure data is physically on disk before we try to read it back. */
-        fflush(file);
-
         /* If the last character is a newline, send the file contents back to the client. */
         if (memchr(buffer, '\n', bytes_read) != NULL)
         {
+            /* Ensure data is physically on disk before we try to read it back. */
+            fflush(file);
+
+            /* Clear the EOF flag from previous reads and reset to start. */
+            clearerr(file);
+
             /* Reset to beginning of file to send everything back. */
             fseek(file, 0, SEEK_SET);
 
@@ -87,8 +90,7 @@ void handleClientConnection(int client_fd, char *client_ip)
             while ((bytes_to_send = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0)
             {
                 syslog(LOG_DEBUG, "Sending %.*s with %zu bytes back to client: %s", (int)bytes_to_send, file_buffer, bytes_to_send, client_ip);
-                ssize_t sent = send(client_fd, file_buffer, bytes_to_send, 0);
-                if (sent < 0)
+                if (send(client_fd, file_buffer, bytes_to_send, 0) < 0)
                 {
                     syslog(LOG_ERR, "Failed to send data back to client");
                     return;
