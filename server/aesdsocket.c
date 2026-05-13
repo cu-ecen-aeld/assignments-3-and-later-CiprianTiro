@@ -54,6 +54,12 @@ void signal_handler(int sig)
         syslog(LOG_DEBUG, "Caught signal, exiting");
 
         appRunning = 0;
+
+        /* Shutdown forces accept() to return so the main loop can exit */
+        if (server_fd != -1)
+        {
+            shutdown(server_fd, SHUT_RDWR);
+        }
     }
 }
 
@@ -80,7 +86,7 @@ void* thread_handlerClientConnection(void *arg)
     syslog(LOG_INFO, "Accepted connection from %s", node->client_ip);
 
     /* Read data from the client until EOF. */
-    while ((bytes_read = recv(node->client_fd, buffer, sizeof(buffer), 0)) > 0)
+    while (!packet_complete && (bytes_read = recv(node->client_fd, buffer, sizeof(buffer), 0)) > 0)
     {
         int packet_complete = 0;
         /* Lock the file mutex to ensure thread safety even before the file is opened. */
@@ -89,52 +95,50 @@ void* thread_handlerClientConnection(void *arg)
         /* Open file for the duration of this client's session.
         Using a+ to avoid opening and closing the file multiple times. */
         FILE *file = fopen("/var/tmp/aesdsocketdata", "a+");
-        if (file == NULL)
+        if (file != NULL)
         {
-            syslog(LOG_ERR, "Failed to open data file for writing");
-            pthread_mutex_unlock(&file_mutex);
-            return NULL;
-        }
-
-        /* This usage of syslog ensures that only the bytes_read amount is printed, ignoring any "garbage" left over in the buffer from previous connections. */
-        syslog(LOG_DEBUG, "Writing %.*s with %zd bytes to data file from client: %s", (int)bytes_read, buffer, bytes_read, node->client_ip);
-        fwrite(buffer, 1, bytes_read, file);
-
-        /* If the last character is a newline, send the file contents back to the client. */
-        if (memchr(buffer, '\n', bytes_read) != NULL)
-        {
-            packet_complete = 1;
-            /* Ensure data is physically on disk before we try to read it back. */
-            fflush(file);
-
-            /* Clear the EOF flag from previous reads and reset to start. */
-            clearerr(file);
-
-            /* Reset to beginning of file to send everything back. */
-            fseek(file, 0, SEEK_SET);
-
-            /* Read the file contents and send it back to the client. */
-            char file_buffer[1024];
-            size_t bytes_to_send;
-            while ((bytes_to_send = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0)
+            /* This usage of syslog ensures that only the bytes_read amount is printed, ignoring any "garbage" left over in the buffer from previous connections. */
+            syslog(LOG_DEBUG, "Writing %.*s with %zd bytes to data file from client: %s", (int)bytes_read, buffer, bytes_read, node->client_ip);
+            fwrite(buffer, 1, bytes_read, file);
+    
+            /* If the last character is a newline, send the file contents back to the client. */
+            if (memchr(buffer, '\n', bytes_read) != NULL)
             {
-                syslog(LOG_DEBUG, "Sending %.*s with %zu bytes back to client: %s", (int)bytes_to_send, file_buffer, bytes_to_send, node->client_ip);
-                if (send(node->client_fd, file_buffer, bytes_to_send, 0) < 0)
+                packet_complete = 1;
+                /* Ensure data is physically on disk before we try to read it back. */
+                fflush(file);
+    
+                /* Clear the EOF flag from previous reads and reset to start. */
+                clearerr(file);
+    
+                /* Reset to beginning of file to send everything back. */
+                fseek(file, 0, SEEK_SET);
+    
+                /* Read the file contents and send it back to the client. */
+                char file_buffer[1024];
+                size_t bytes_to_send;
+                while ((bytes_to_send = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0)
                 {
-                    syslog(LOG_ERR, "Failed to send data back to client");
-                    return NULL;
+                    syslog(LOG_DEBUG, "Sending %.*s with %zu bytes back to client: %s", (int)bytes_to_send, file_buffer, bytes_to_send, node->client_ip);
+                    if (send(node->client_fd, file_buffer, bytes_to_send, 0) < 0)
+                    {
+                        syslog(LOG_ERR, "Failed to send data back to client");
+                        break;
+                    }
                 }
             }
             fclose(file);
         }
         pthread_mutex_unlock(&file_mutex);
-
-        /* Break loop and close connection if packet was finished. */
-        if (packet_complete)
-        {
-            break;
-        }
     }
+
+    syslog(LOG_INFO, "Closed connection from %s", node->client_ip);
+    /* Close the client socket if it's still open. */
+    close(node->client_fd);
+
+    /* Mark the thread as complete so the main thread can reap (free) the memory. */
+    node->is_complete = 1;
+
     return NULL;
 }
 
@@ -318,8 +322,6 @@ int main (int argc, char *argv[])
                 free(curr);
             }
         }
-
-        syslog(LOG_DEBUG, "Closed connection from %s", new_node->client_ip);
     }
 
     syslog(LOG_INFO, "Shutting down, cleaning up threads...");
