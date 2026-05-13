@@ -7,10 +7,45 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <sys/queue.h>
+#include <time.h>
+
+#ifndef STAILQ_FOREACH_SAFE
+/**
+ * STAILQ_FOREACH_SAFE - Iterates over a tail queue safely against removal of tail queue entry
+ * @var:    The loop variable (current node)
+ * @head:   The head of the tail queue
+ * @field:  The name of the STAILQ_ENTRY field within the structure
+ * @tvar:   A temporary pointer used to store the next node's address 
+ *          before the current node is potentially freed.
+ */
+#define STAILQ_FOREACH_SAFE(var, head, field, tvar)           \
+    for ((var) = STAILQ_FIRST((head));                        \
+        (var) && ((tvar) = STAILQ_NEXT((var), field), 1);     \
+        (var) = (tvar))
+#endif
 
 /* Global variables to be accessed by signal handler. */
 int server_fd = -1;
 int client_fd = -1;
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Chosed usage of STAILQ (Singly-linked Tail Queue) because it can point to its head but also to the tail. */
+typedef struct thread_node
+{
+    pthread_t thread_id;
+    int client_fd;
+    char *client_ip;
+    int is_complete;
+    STAILQ_ENTRY(thread_node) entries;
+} thread_node_t;
+
+/* Define the head of the list. */
+STAILQ_HEAD(thread_list, thread_node);
+
+/* sig atomic is required because writing to an integer takes multiple instructions and a signal handler might interrupt the write operation. */
+volatile sig_atomic_t appRunning = 1;
 
 void signal_handler(int sig)
 {
@@ -18,22 +53,7 @@ void signal_handler(int sig)
     {
         syslog(LOG_DEBUG, "Caught signal, exiting");
 
-        /* Delete the data file if it exists. */
-        syslog(LOG_DEBUG, "Deleting data file if it exists");
-        unlink("/var/tmp/aesdsocketdata");
-        
-        /* Close the socket so the port is freed immediately. */
-        if (server_fd != -1)
-        {
-            syslog(LOG_DEBUG, "Closing socket");
-            close(server_fd);
-        }
-        
-        syslog(LOG_DEBUG, "Closing syslog");
-        closelog();
-
-        /* Gracefully exit. */
-        exit(0);
+        appRunning = 0;
     }
 }
 
@@ -50,31 +70,40 @@ void setSignalAction()
     sigaction(SIGTERM, &sa, NULL);
 }
 
-void handleClientConnection(int client_fd, char *client_ip)
+void* thread_handlerClientConnection(void *arg)
 {
     /* Buffer to hold data from client. */
     char buffer[1024];
     ssize_t bytes_read;
-    
-    /* Open file for the duration of this client's session.
-       Using a+ to avoid opening and closing the file multiple times. */
-    FILE *file = fopen("/var/tmp/aesdsocketdata", "a+");
-    if (file == NULL)
-    {
-        syslog(LOG_ERR, "Failed to open data file for writing");
-        return;
-    }
+    thread_node_t *node = (thread_node_t *)arg;
+
+    syslog(LOG_INFO, "Accepted connection from %s", node->client_ip);
 
     /* Read data from the client until EOF. */
-    while ((bytes_read = recv(client_fd, buffer, sizeof(buffer), 0)) > 0)
+    while ((bytes_read = recv(node->client_fd, buffer, sizeof(buffer), 0)) > 0)
     {
+        int packet_complete = 0;
+        /* Lock the file mutex to ensure thread safety even before the file is opened. */
+        pthread_mutex_lock(&file_mutex);
+
+        /* Open file for the duration of this client's session.
+        Using a+ to avoid opening and closing the file multiple times. */
+        FILE *file = fopen("/var/tmp/aesdsocketdata", "a+");
+        if (file == NULL)
+        {
+            syslog(LOG_ERR, "Failed to open data file for writing");
+            pthread_mutex_unlock(&file_mutex);
+            return NULL;
+        }
+
         /* This usage of syslog ensures that only the bytes_read amount is printed, ignoring any "garbage" left over in the buffer from previous connections. */
-        syslog(LOG_DEBUG, "Writing %.*s with %zd bytes to data file from client: %s", (int)bytes_read, buffer, bytes_read, client_ip);
+        syslog(LOG_DEBUG, "Writing %.*s with %zd bytes to data file from client: %s", (int)bytes_read, buffer, bytes_read, node->client_ip);
         fwrite(buffer, 1, bytes_read, file);
 
         /* If the last character is a newline, send the file contents back to the client. */
         if (memchr(buffer, '\n', bytes_read) != NULL)
         {
+            packet_complete = 1;
             /* Ensure data is physically on disk before we try to read it back. */
             fflush(file);
 
@@ -89,24 +118,60 @@ void handleClientConnection(int client_fd, char *client_ip)
             size_t bytes_to_send;
             while ((bytes_to_send = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0)
             {
-                syslog(LOG_DEBUG, "Sending %.*s with %zu bytes back to client: %s", (int)bytes_to_send, file_buffer, bytes_to_send, client_ip);
-                if (send(client_fd, file_buffer, bytes_to_send, 0) < 0)
+                syslog(LOG_DEBUG, "Sending %.*s with %zu bytes back to client: %s", (int)bytes_to_send, file_buffer, bytes_to_send, node->client_ip);
+                if (send(node->client_fd, file_buffer, bytes_to_send, 0) < 0)
                 {
                     syslog(LOG_ERR, "Failed to send data back to client");
-                    return;
+                    return NULL;
                 }
             }
+            fclose(file);
+        }
+        pthread_mutex_unlock(&file_mutex);
 
-            /* After sending, seek back to the end so the next recv appends correctly. */
-            fseek(file, 0, SEEK_END);
+        /* Break loop and close connection if packet was finished. */
+        if (packet_complete)
+        {
+            break;
         }
     }
-    fclose(file);
+    return NULL;
+}
 
-    if (bytes_read < 0)
+void* timestamp_timer(void* arg)
+{
+    while (appRunning)
     {
-        syslog(LOG_ERR, "Failed to read data from client %s", client_ip);
+        /* Wait for 10 seconds but only if the application is still running. */
+        for (int i = 0; i < 10 && appRunning; i++)
+        {
+            sleep(1);
+        }
+        
+        if (!appRunning) break;
+
+        time_t rawtime;
+        struct tm *info;
+        char buffer[100];
+
+        time(&rawtime);
+        info = localtime(&rawtime);
+
+        /* RFC 2822 format: %a, %d %b %Y %H:%M:%S %z
+           Requirement: "timestamp:year, month, day, hour, minute, second"
+           strftime format: %Y, %m, %d, %H, %M, %S*/
+        strftime(buffer, sizeof(buffer), "timestamp:%Y, %m, %d, %H, %M, %S\n", info);
+
+        pthread_mutex_lock(&file_mutex);
+        FILE *file = fopen("/var/tmp/aesdsocketdata", "a+");
+        if (file)
+        {
+            fputs(buffer, file);
+            fclose(file);
+        }
+        pthread_mutex_unlock(&file_mutex);
     }
+    return NULL;
 }
 
 int main (int argc, char *argv[])
@@ -115,8 +180,9 @@ int main (int argc, char *argv[])
     /* Clean the memory. */
     memset(&address, 0, sizeof(address));
 
-    char *client_ip;
-
+    /* Initialize the queue. */
+    struct thread_list head;
+    STAILQ_INIT(&head);
     /* Start the system logger. */
     openlog("aesdsocket", LOG_PID, LOG_USER);
 
@@ -199,7 +265,18 @@ int main (int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
     
-    while(1)
+    pthread_t timer_thread;
+    /* Create the timer thread. */
+    if (pthread_create(&timer_thread, NULL, timestamp_timer, NULL) != 0)
+    {
+        syslog(LOG_ERR, "Failed to create timer thread");
+        close(server_fd);
+        closelog();
+        exit(EXIT_FAILURE);
+    }
+
+    /* As long as there is no signal to exit. */
+    while(appRunning)
     {
         struct sockaddr_in client_addr;
         /* Required for accept function. */
@@ -215,22 +292,66 @@ int main (int argc, char *argv[])
             /* The signal handler will handle the actual exit logic. */
             continue;
         }
-        else
 
-        /* Log connection from client IP */
-        client_ip = inet_ntoa(client_addr.sin_addr);
-        syslog(LOG_INFO, "Accepted connection from %s", client_ip);
-        
-        /* Handle the client connection. */
-        handleClientConnection(client_fd, client_ip);
+        /* Allocate a new thread node for the client connection. */
+        thread_node_t *new_node = malloc(sizeof(thread_node_t));
+        new_node->client_fd = client_fd;
+        new_node->is_complete = 0;
+        new_node->client_ip = strdup(inet_ntoa(client_addr.sin_addr));
+        syslog(LOG_INFO, "Accepted connection from %s", new_node->client_ip);
 
-        /* Close this specific client connection */
-        close(client_fd);
+        /* Add the new node to the list. */
+        STAILQ_INSERT_TAIL(&head, new_node, entries);
 
-        /* Mark the client file descriptor as invalid. */
-        client_fd = -1;
-        syslog(LOG_DEBUG, "Closed connection from %s", client_ip);
+        /* Create the thread for handling the client connection. */
+        pthread_create(&new_node->thread_id, NULL, thread_handlerClientConnection, new_node);
+
+        /* While running, check for completed threads, and clean them up. */
+        thread_node_t *curr, *t_next;
+        STAILQ_FOREACH_SAFE(curr, &head, entries, t_next)
+        {
+            if (curr->is_complete)
+            {
+                pthread_join(curr->thread_id, NULL);
+                STAILQ_REMOVE(&head, curr, thread_node, entries);
+                free(curr->client_ip);
+                free(curr);
+            }
+        }
+
+        syslog(LOG_DEBUG, "Closed connection from %s", new_node->client_ip);
     }
 
+    syslog(LOG_INFO, "Shutting down, cleaning up threads...");
+
+    /* Wait for the timer thread to finish. */
+    pthread_join(timer_thread, NULL);
+
+    /* If signal received, then wait for all running threads to complete. */
+    thread_node_t *curr, *t_next;
+    STAILQ_FOREACH_SAFE(curr, &head, entries, t_next)
+    {
+        pthread_join(curr->thread_id, NULL);
+        free(curr->client_ip);
+        free(curr);
+    }
+
+    pthread_mutex_destroy(&file_mutex);
+
+    /* Delete the data file if it exists. */
+    syslog(LOG_DEBUG, "Deleting data file if it exists");
+    unlink("/var/tmp/aesdsocketdata");
+    
+    /* Close the socket so the port is freed immediately. */
+    if (server_fd != -1)
+    {
+        syslog(LOG_DEBUG, "Closing socket");
+        close(server_fd);
+    }
+    
+    syslog(LOG_DEBUG, "Shutdown complete, exiting");
+    closelog();
+
+    /* Gracefully exit. */
     return 0;
 }
