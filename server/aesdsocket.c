@@ -82,13 +82,14 @@ void* thread_handlerClientConnection(void *arg)
     char buffer[1024];
     ssize_t bytes_read;
     thread_node_t *node = (thread_node_t *)arg;
-
+    
+    int packet_complete = 0;
+    
     syslog(LOG_INFO, "Accepted connection from %s", node->client_ip);
-
+    
     /* Read data from the client until EOF. */
     while (!packet_complete && (bytes_read = recv(node->client_fd, buffer, sizeof(buffer), 0)) > 0)
     {
-        int packet_complete = 0;
         /* Lock the file mutex to ensure thread safety even before the file is opened. */
         pthread_mutex_lock(&file_mutex);
 
